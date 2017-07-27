@@ -4,8 +4,8 @@ import os
 import numpy as np
 from torch import optim
 from torch.autograd import Variable
-from model_InfoGAN import Discriminator
-from model_InfoGAN import Generator
+from model_EBGAN import Discriminator
+from model_EBGAN import Generator
 
 
 class Solver(object):
@@ -17,9 +17,6 @@ class Solver(object):
         self.g_conv_dim = config.g_conv_dim
         self.d_conv_dim = config.d_conv_dim
         self.z_dim = config.z_dim
-        self.disc_code_dim = config.disc_code_dim
-        self.cont_code_dim = config.cont_code_dim
-
         self.beta1 = config.beta1
         self.beta2 = config.beta2
         self.image_size = config.image_size
@@ -38,20 +35,13 @@ class Solver(object):
         """Build generator and discriminator."""
         self.generator = Generator(z_dim=self.z_dim,
                                    image_size=self.image_size,
-                                   conv_dim=self.g_conv_dim,
-                                   c_c_dim=self.cont_code_dim,
-                                   d_c_dim=self.disc_code_dim)
+                                   conv_dim=self.g_conv_dim)
         self.discriminator = Discriminator(image_size=self.image_size,
-                                           conv_dim=self.d_conv_dim,
-                                           c_c_dim=self.cont_code_dim,
-                                           d_c_dim=self.disc_code_dim)
+                                           conv_dim=self.d_conv_dim)
         self.g_optimizer = optim.Adam(self.generator.parameters(),
                                       self.lr, [self.beta1, self.beta2])
         self.d_optimizer = optim.Adam(self.discriminator.parameters(),
                                       self.lr, [self.beta1, self.beta2])
-
-        self.D_criterion = torch.nn.BCELoss()
-        self.G_criterion = torch.nn.BCELoss()
         
         if torch.cuda.is_available():
             self.generator.cuda()
@@ -79,24 +69,11 @@ class Solver(object):
         out = (x + 1) / 2
         return out.clamp(0, 1)
 
-    # InfoGAN Function
-    def gen_cont_c(self, n_size, dim):
-        return torch.Tensor(np.random.randn(n_size, dim) * 0.5 + 0.0)
-
-    # InfoGAN Function
-    def gen_disc_c(self, n_size, dim):
-        codes=[]
-        code = np.zeros((n_size, dim))
-        random_cate = np.random.randint(0, dim, n_size)
-        code[range(n_size), random_cate] = 1
-        codes.append(code)
-        codes = np.concatenate(codes,1)
-        return torch.Tensor(codes)
-
     def train(self):
         """Train generator and discriminator."""
-        fixed_noise = self.to_variable(torch.randn(100, self.z_dim))
+        fixed_noise = self.to_variable(torch.randn(self.batch_size, self.z_dim))
         total_step = len(self.data_loader)
+
         for epoch in range(self.num_epochs):
             for i, images in enumerate(self.data_loader):
                 
@@ -104,77 +81,69 @@ class Solver(object):
                 images = self.to_variable(images)
                 batch_size = images.size(0)
                 noise = self.to_variable(torch.randn(batch_size, self.z_dim))
+                
+                # Train D to recognize real images as real.
+                outputs = self.discriminator(images)
+                real_loss = torch.mean(torch.sum((outputs - images) ** 2, 1))      
 
-                #InfoGAN Code Generation
-                cont_codes = self.to_variable(self.gen_cont_c(batch_size, self.cont_code_dim))
-                disc_codes = self.to_variable(self.gen_disc_c(batch_size, self.disc_code_dim))
+                # Train D to recognize fake images as fake.
+                fake_images = self.generator(noise)
+                outputs = self.discriminator(fake_images)
+                fake_loss = torch.mean(torch.sum((outputs - fake_images) ** 2, 1))
 
-                infogan_inputs = torch.cat((noise, cont_codes, disc_codes), 1)
-                fake_images = self.generator(infogan_inputs)
-                new_inputs = torch.cat([images, fake_images])
-
-                # Make Labels
-                labels = np.zeros(2 * batch_size)
-                labels[:batch_size] = 1
-                labels = self.to_variable(torch.from_numpy(labels.astype(np.float32)))
-
-                outputs = self.discriminator(new_inputs)
-
+                # Backprop + optimize
+                d_loss = real_loss + torch.nn.functional.relu(1 - fake_loss) # 1 is margin
                 self.discriminator.zero_grad()
-
-                Q_cx_dis = outputs[batch_size:, 3:5]
-                codes = disc_codes[:, 0:2]
-                L_discrete = -torch.mean(torch.sum(Q_cx_dis * codes, 1))
-                Q_cx_cont = outputs[batch_size:, 1:3]
-                L_conti = torch.mean((((Q_cx_cont - 0.0) / 0.5) ** 2))
-
-                # InfoGAN Loss
-                D_loss = self.D_criterion(outputs[:,0], labels) + 1.0 * L_discrete + 0.5 * L_conti
-                D_loss.backward(retain_variables=True)
+                d_loss.backward()
                 self.d_optimizer.step()
                 
                 #===================== Train G =====================#
+                noise = self.to_variable(torch.randn(batch_size, self.z_dim))
+                
+                # Train G so that D recognizes G(z) as real.
+                fake_images = self.generator(noise)
+                outputs = self.discriminator(fake_images)
+                g_loss = torch.mean(torch.sum((outputs - fake_images) ** 2, 1))
+
+                # Generator PT Regularizer Term
+                # PT Reg. Term
+                sample = fake_images.view(-1, batch_size) # 12288 x 32
+                nom = torch.mm(torch.transpose(sample, 0, 1), sample) # 32x32
+
+                denoms = torch.zeros((64*64*3, batch_size))
+                denom_column = torch.sqrt(torch.sum(torch.pow(sample,2), 0)) # Should be 32x32
+                
+                denoms[0,:] = denom_column.data
+                denom = torch.mm(torch.transpose(denoms, 0, 1), denoms)
+
+                denom = denom.cuda()
+                pt = torch.pow(torch.div(nom.data, denom), 2) # 32x32
+                
+                # Remove Diagonal Term
+                pt -= torch.diag(torch.diag(pt,0))
+
+                # Final PT Value
+                pt = torch.sum(pt) / (batch_size * (batch_size - 1))
+                g_loss = g_loss + 0.1 * pt
+                
+                # Backprop + optimize
                 self.generator.zero_grad()
-
-                # InfoGAN Loss
-                G_loss = self.G_criterion(outputs[batch_size:, 0], labels[:batch_size]) + 1.0 * L_discrete + 0.5 * L_conti
-
-                G_loss.backward()
+                g_loss.backward()
                 self.g_optimizer.step()
     
                 # print the log info
                 if (i+1) % self.log_step == 0:
-                    print('Epoch [%d/%d], Step[%d/%d], D_loss: %.4f, ' 
-                          'G_loss: %.4f, G_loss: %.4f' 
+                    print('Epoch [%d/%d], Step[%d/%d], d_real_loss: %.4f, ' 
+                          'd_fake_loss: %.4f, g_loss: %.4f' 
                           %(epoch+1, self.num_epochs, i+1, total_step, 
-                            D_loss.data[0], G_loss.data[0], G_loss.data[0]))
+                            real_loss.data[0], fake_loss.data[0], g_loss.data[0]))
 
                 # save the sampled images
                 if (i+1) % self.sample_step == 0:
-                    # -1 to 1 of First Continuous Code
-                    tmp = np.zeros((100,2))
-                    tmp[0:25,0] = np.linspace(-3,3,25)
-                    tmp[25:50,1] = np.linspace(-3,3,25)
-                    tmp[50:75,0] = np.linspace(-3,3,25)
-                    tmp[75:100,1] = np.linspace(-3,3,25)
-                    cont_codes = self.to_variable(torch.Tensor(tmp))
-
-                    # 1 of First Categorical Code
-                    tmp2 = np.zeros((100,2))
-                    tmp2[0:50,0] = 1
-                    tmp2[50:100,1] = 1
-                    disc_codes = self.to_variable(torch.Tensor(tmp2))
-
-                    # Fixed Noise = Zero
-                    cont_noise = self.to_variable(torch.Tensor(np.zeros((100,self.z_dim))))
-
-                    infogan_inputs = torch.cat((cont_noise, cont_codes, disc_codes), 1)
-
-                    fake_images = self.generator(infogan_inputs)
-
+                    fake_images = self.generator(fixed_noise)
                     torchvision.utils.save_image(self.denorm(fake_images.data), 
                         os.path.join(self.sample_path,
-                                     'fake_samples-%d-%d.png' %(epoch+1, i+1)), nrow=10)
+                                     'fake_samples-%d-%d.png' %(epoch+1, i+1)))
             
             # save the model parameters for each epoch
             g_path = os.path.join(self.model_path, 'generator-%d.pkl' %(epoch+1))

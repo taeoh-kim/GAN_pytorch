@@ -13,11 +13,9 @@ def deconv(c_in, c_out, k_size, stride=2, pad=1, bn=True):
 
 class Generator(nn.Module):
     """Generator containing 7 deconvolutional layers."""
-    def __init__(self, z_dim=256, image_size=128, conv_dim=64, c_c_dim=2, d_c_dim=2):
+    def __init__(self, z_dim=256, image_size=128, conv_dim=64):
         super(Generator, self).__init__()
-
-        n_input = z_dim + c_c_dim + d_c_dim # Additional Latent Code Inputs
-        self.fc = deconv(n_input, conv_dim*8, int(image_size/16), 1, 0, bn=False)
+        self.fc = deconv(z_dim, conv_dim*8, int(image_size/16), 1, 0, bn=False)
         self.deconv1 = deconv(conv_dim*8, conv_dim*4, 4)
         self.deconv2 = deconv(conv_dim*4, conv_dim*2, 4)
         self.deconv3 = deconv(conv_dim*2, conv_dim, 4)
@@ -43,26 +41,23 @@ def conv(c_in, c_out, k_size, stride=2, pad=1, bn=True):
 
 
 class Discriminator(nn.Module):
-    """Discriminator containing 4 convolutional layers."""
-    def __init__(self, image_size=128, conv_dim=64, c_c_dim=2, d_c_dim=2):
+    """Discriminator containing AutoEncoders"""
+    def __init__(self, image_size=128, conv_dim=64):
         super(Discriminator, self).__init__()
-        self.c_c_dim = c_c_dim
-        self.d_c_dim = d_c_dim
-
         self.conv1 = conv(3, conv_dim, 4, bn=False)
         self.conv2 = conv(conv_dim, conv_dim*2, 4)
         self.conv3 = conv(conv_dim*2, conv_dim*4, 4)
-        self.conv4 = conv(conv_dim*4, conv_dim*8, 4)
-        self.fc = conv(conv_dim*8, 1 + c_c_dim+ d_c_dim, int(image_size/16), 1, 0, False)
+        self.deconv5 = deconv(conv_dim*4, conv_dim*2, 4)
+        self.deconv6 = deconv(conv_dim*2, conv_dim, 4)
+        self.deconv7 = deconv(conv_dim, 3, 4, bn=False)
         
     def forward(self, x):                         # If image_size is 64, output shape is as below.
         out = F.leaky_relu(self.conv1(x), 0.05)    # (?, 64, 32, 32)
         out = F.leaky_relu(self.conv2(out), 0.05)  # (?, 128, 16, 16)
         out = F.leaky_relu(self.conv3(out), 0.05)  # (?, 256, 8, 8)
-        out = F.leaky_relu(self.conv4(out), 0.05)  # (?, 512, 4, 4)
-        out = self.fc(out).squeeze()
 
-        out[:,0] = F.sigmoid(out[:,0].clone())
-        out[:,self.c_c_dim+1:self.c_c_dim+1+self.d_c_dim] = F.softmax(out[:,self.c_c_dim+1:self.c_c_dim+1+self.d_c_dim].clone())
+        out = F.leaky_relu(self.deconv5(out), 0.05) # (?, 128, 16, 16)
+        out = F.leaky_relu(self.deconv6(out), 0.05)  # (?, 64, 32, 32)
+        out = F.tanh(self.deconv7(out))  # (?, 3, 64, 64)
 
         return out

@@ -1,6 +1,6 @@
 import argparse
 import os
-from solver_InfoGAN import Solver
+from solver_EBGAN import Solver
 from data_loader import get_loader
 from torch.backends import cudnn
 
@@ -35,10 +35,6 @@ if __name__ == '__main__':
     parser.add_argument('--z_dim', type=int, default=100)
     parser.add_argument('--g_conv_dim', type=int, default=64)
     parser.add_argument('--d_conv_dim', type=int, default=64)
-
-    # model hypet-parameters for InfoGAN
-    parser.add_argument('--disc_code_dim', type=int, default=2)
-    parser.add_argument('--cont_code_dim', type=int, default=2)
     
     # training hyper-parameters
     parser.add_argument('--num_epochs', type=int, default=20)
